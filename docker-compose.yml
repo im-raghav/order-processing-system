@@ -155,6 +155,11 @@ services:
     restart: unless-stopped
     depends_on:
       - coordinator
+    environment:
+      # unset by default (open, fine for local dev); set both to gate the app behind
+      # HTTP Basic Auth, e.g. before a public deployment
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:-}
+      BASIC_AUTH_PASSWORD: ${BASIC_AUTH_PASSWORD:-}
     ports:
       - '${FRONTEND_PORT:-4200}:80'
 

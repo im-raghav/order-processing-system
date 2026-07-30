@@ -25,6 +25,7 @@ import { CreateSagaDto } from './dto/create-saga.dto';
 import { STEP_CLIENTS, StepClients } from './step-clients/step-clients.provider';
 import { STEP_JOB_OPTIONS, ORCHESTRATION_JOB_OPTIONS } from './bullmq-job-options';
 import { NotificationPusherService } from './notification-pusher.service';
+import { decideDoOutcome, decideCompensationOutcome as decideCompensationOutcomePure } from './decide-outcome';
 
 @Injectable()
 export class SagaService {
@@ -243,9 +244,9 @@ export class SagaService {
    * decision point) - safe to re-run since every write here is itself idempotent. */
   async decideAndAdvance(orderId: string): Promise<void> {
     const doSteps = await this.sagaStepsRepository.find({ where: { orderId, phase: Phase.DO } });
-    const allDone = doSteps.every((s) => s.status === StepStatus.DONE);
+    const decision = decideDoOutcome(doSteps);
 
-    if (allDone) {
+    if (decision.kind === 'PLACED') {
       await this.sagasRepository.manager.query(
         `UPDATE sagas SET status = 'PLACED' WHERE order_id = ? AND status = 'IN_PROGRESS'`,
         [orderId],
@@ -253,8 +254,7 @@ export class SagaService {
       return;
     }
 
-    const doneSteps = doSteps.filter((s) => s.status === StepStatus.DONE);
-    if (doneSteps.length === 0) {
+    if (decision.kind === 'CANCELLED_NO_COMPENSATION_NEEDED') {
       await this.sagasRepository.manager.query(
         `UPDATE sagas SET status = 'CANCELLED' WHERE order_id = ? AND status = 'IN_PROGRESS'`,
         [orderId],
@@ -262,27 +262,27 @@ export class SagaService {
       return;
     }
 
-    for (const s of doneSteps) {
+    for (const stepName of decision.stepsToUndo) {
       await this.sagaStepsRepository.manager.query(
         `INSERT INTO saga_steps (order_id, step_name, phase, status)
          VALUES (?, ?, 'UNDO', 'PENDING')
          ON DUPLICATE KEY UPDATE order_id = order_id`,
-        [orderId, s.stepName],
+        [orderId, stepName],
       );
     }
 
     // set the undo fan-in counter before enqueueing, so the first undo worker to finish
     // (which could be near-instant) never observes a stale/unset value
     await this.sagasRepository.manager.query(`UPDATE sagas SET pending_undo_count = ? WHERE order_id = ?`, [
-      doneSteps.length,
+      decision.stepsToUndo.length,
       orderId,
     ]);
 
-    for (const s of doneSteps) {
+    for (const stepName of decision.stepsToUndo) {
       await this.undoQueue.add(
-        s.stepName,
-        { orderId, stepName: s.stepName },
-        { ...STEP_JOB_OPTIONS, jobId: undoJobId(orderId, s.stepName) },
+        stepName,
+        { orderId, stepName },
+        { ...STEP_JOB_OPTIONS, jobId: undoJobId(orderId, stepName) },
       );
     }
   }
@@ -292,11 +292,11 @@ export class SagaService {
    * the saga still IN_PROGRESS. */
   async decideCompensationOutcome(orderId: string): Promise<void> {
     const undoSteps = await this.sagaStepsRepository.find({ where: { orderId, phase: Phase.UNDO } });
-    const allDone = undoSteps.every((s) => s.status === StepStatus.DONE);
+    const decision = decideCompensationOutcomePure(undoSteps);
 
     await this.sagasRepository.manager.query(
       `UPDATE sagas SET status = ? WHERE order_id = ? AND status = 'IN_PROGRESS'`,
-      [allDone ? SagaStatus.CANCELLED : SagaStatus.NEEDS_ATTENTION, orderId],
+      [decision === 'CANCELLED' ? SagaStatus.CANCELLED : SagaStatus.NEEDS_ATTENTION, orderId],
     );
   }
 
