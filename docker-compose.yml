@@ -1,0 +1,162 @@
+services:
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+      MYSQL_USER: ${MYSQL_USER:-app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app_password}
+    ports:
+      - '3306:3306'
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docs/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-uroot', '-p${MYSQL_ROOT_PASSWORD:-root_password}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  order-service:
+    build: ./services/order-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PORT: 3001
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-app}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-app_password}
+      DB_NAME: order_service
+    ports:
+      - '${ORDER_SERVICE_PORT:-3001}:3001'
+
+  inventory-service:
+    build: ./services/inventory-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PORT: 3002
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-app}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-app_password}
+      DB_NAME: inventory_service
+    volumes:
+      - ./sample_inventory.csv:/app/sample_inventory.csv:ro
+    ports:
+      - '${INVENTORY_SERVICE_PORT:-3002}:3002'
+
+  payment-service:
+    build: ./services/payment-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PORT: 3003
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-app}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-app_password}
+      DB_NAME: payment_service
+    ports:
+      - '${PAYMENT_SERVICE_PORT:-3003}:3003'
+
+  shipping-service:
+    build: ./services/shipping-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PORT: 3004
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-app}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-app_password}
+      DB_NAME: shipping_service
+    ports:
+      - '${SHIPPING_SERVICE_PORT:-3004}:3004'
+
+  coordinator:
+    build: ./services/coordinator
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      order-service:
+        condition: service_started
+      inventory-service:
+        condition: service_started
+      payment-service:
+        condition: service_started
+      shipping-service:
+        condition: service_started
+      notification-service:
+        condition: service_started
+    environment:
+      PORT: 3000
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-app}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-app_password}
+      DB_NAME: coordinator
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ORDER_SERVICE_URL: http://order-service:3001
+      INVENTORY_SERVICE_URL: http://inventory-service:3002
+      PAYMENT_SERVICE_URL: http://payment-service:3003
+      SHIPPING_SERVICE_URL: http://shipping-service:3004
+      NOTIFICATION_SERVICE_URL: http://notification-service:3005
+    ports:
+      - '${COORDINATOR_PORT:-3000}:3000'
+
+  notification-service:
+    build: ./services/notification-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PORT: 3005
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-app}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-app_password}
+      DB_NAME: notification_service
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      NOTIFICATION_SCAN_INTERVAL_MS: ${NOTIFICATION_SCAN_INTERVAL_MS:-900000}
+    ports:
+      - '${NOTIFICATION_SERVICE_PORT:-3005}:3005'
+
+  frontend:
+    build: ./frontend/order-console
+    restart: unless-stopped
+    depends_on:
+      - coordinator
+    ports:
+      - '${FRONTEND_PORT:-4200}:80'
+
+volumes:
+  mysql_data:
