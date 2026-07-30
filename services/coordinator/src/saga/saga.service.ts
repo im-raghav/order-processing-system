@@ -294,8 +294,10 @@ export class SagaService {
     const undoSteps = await this.sagaStepsRepository.find({ where: { orderId, phase: Phase.UNDO } });
     const decision = decideCompensationOutcomePure(undoSteps);
 
+    // Reachable from IN_PROGRESS the first time undos settle, or from NEEDS_ATTENTION when a
+    // manual retry-compensation resolves undos that had previously failed.
     await this.sagasRepository.manager.query(
-      `UPDATE sagas SET status = ? WHERE order_id = ? AND status = 'IN_PROGRESS'`,
+      `UPDATE sagas SET status = ? WHERE order_id = ? AND status IN ('IN_PROGRESS', 'NEEDS_ATTENTION')`,
       [decision === 'CANCELLED' ? SagaStatus.CANCELLED : SagaStatus.NEEDS_ATTENTION, orderId],
     );
   }
@@ -326,7 +328,16 @@ export class SagaService {
       const jobId = undoJobId(orderId, s.stepName);
       const existingJob = await this.undoQueue.getJob(jobId);
       if (existingJob) {
-        await existingJob.retry('failed');
+        const state = await existingJob.getState();
+        if (state === 'failed') {
+          await existingJob.retry('failed');
+        } else {
+          // A business-level failure (e.g. SIMULATED_COMPENSATION_FAILURE) records a FAILED
+          // step without throwing, so BullMQ considers the job 'completed', not 'failed' -
+          // remove it so a fresh job with the same id can be queued and picked up again.
+          await existingJob.remove();
+          await this.undoQueue.add(s.stepName, { orderId, stepName: s.stepName }, { ...STEP_JOB_OPTIONS, jobId });
+        }
       } else {
         await this.undoQueue.add(s.stepName, { orderId, stepName: s.stepName }, { ...STEP_JOB_OPTIONS, jobId });
       }
